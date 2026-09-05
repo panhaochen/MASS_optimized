@@ -17,9 +17,15 @@ import numpy as np
 import json
 from enum import IntFlag 
 from scipy.stats import percentileofscore  
+from stock_disagreement.config import (
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_MAX_TOKENS,
+    LLM_MODEL_NAME,
+    first_existing_data_path,
+)
 
 MAX_RETRIRES = 3
-ROOT_PATH = ""
 
 def calculate_pe_quantile_5y(df:pd.DataFrame) -> pd.DataFrame:  
     
@@ -54,9 +60,9 @@ class Modality(IntFlag):
 
 
 class StockDisagreementAgent():
-    model_name: str = "Qwen2.5-72B-Instruct"
-    model_server: str = "http://127.0.0.1:1025/v1"
-    api_key: str = ""
+    model_name: str = LLM_MODEL_NAME
+    model_server: str = LLM_BASE_URL
+    api_key: str = LLM_API_KEY
     prev_stock: list[str] | None = None
     system_prompt: str = "You are a helpful assistant. Strictly follow the user's input prompt and output the result in JSON format as specified. Do not include any additional content."
     investing_history: InvestingHistory = InvestingHistory()
@@ -79,8 +85,12 @@ class StockDisagreementAgent():
                  use_self_reflection: bool = False,
                  use_macro_data: bool = False,
                  ):
+        if not self.api_key:
+            raise RuntimeError(
+                "MASS_LLM_API_KEY is not set. Set it to your LLM API key before running MASS."
+            )
         self.client = OpenAI(api_key=self.api_key, base_url=self.model_server)
-        self.model = OpenAIModel(self.model_name, None, 80000)
+        self.model = OpenAIModel(self.model_name, None, LLM_MAX_TOKENS)
         self.stock_num = stock_num
         self.stock_pool = stock_pool
         self.stock_labels = stock_labels
@@ -162,7 +172,7 @@ class StockDisagreementAgent():
                     "Log-orthogonalized E/P", "Log-orthogonalized B/P",
                     "Log-orthogonalized CF/P", "Log-orthogonalized S/P", "EBITDA/EV"]
             
-            self.prepare_data["fudamental_valuation"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/sub_fudamental_data.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["fudamental_valuation"] = pd.read_parquet(first_existing_data_path("sub_fudamental_data.parq"))[["Stock", "Date"] + keys]
             self.description["E/P"] = "The inverse of the P/E ratio (E/P) indicates the earnings yield, showing the percentage of profit generated per dollar invested in the stock."
             self.description["B/P"] = "Inverse of P/B (B/P) indicates the book yield, showing the return on book value per dollar invested."
             self.description["S/P"] = "Inverse of P/S (S/P) reflects the sales yield, showing sales generated per dollar invested."
@@ -175,7 +185,7 @@ class StockDisagreementAgent():
         
         if self.modality & Modality.FUDAMENTAL_QUALITY:
             keys = ["ROE stability", "ROA stability", "ROE", "Annualized ROE"]
-            self.prepare_data["fudamental_quality"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/sub_fudamental_data.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["fudamental_quality"] = pd.read_parquet(first_existing_data_path("sub_fudamental_data.parq"))[["Stock", "Date"] + keys]
             self.description["ROE"] = "ROE Measures profitability, showing net income generated per dollar of shareholders' equity."
             self.description["ROE stability"] = "TS_Mean(ROE, 8) / TS_Std(ROE, 8), measuring both absolute value and stability of ROE."
             self.description["ROA stability"] = "TS_Mean(ROA, 8) / TS_Std(ROA, 8), measuring both absolute value and stability of ROA."
@@ -183,21 +193,21 @@ class StockDisagreementAgent():
         
         if self.modality & Modality.FUDAMENTAL_DIVIDEND:
             keys = ["Dividend yield", "Log-orthogonalized dividend yield", "Log-orthogonalized dividend yield", "Dividend yield incl repo & mjrholder trans"]
-            self.prepare_data["fudamental_dividend"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/sub_fudamental_data.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["fudamental_dividend"] = pd.read_parquet(first_existing_data_path("sub_fudamental_data.parq"))[["Stock", "Date"] + keys]
             self.description["Dividend yield"] = "Dividend yield indicates annual dividends received per dollar invested, expressed as a percentage of the stock price"
             self.description["Log-orthogonalized dividend yield"] = "Log-orthogonalized version of dividend yield, removing some kind of cap basis."
             self.description["Dividend yield incl repo & mjrholder trans"] = "Dividend yield including stock repurchasing and major holder trading."
         
         if self.modality & Modality.FUDAMENTAL_GROWTH:
             keys = ["Revenue TTM YoY growth rate", "Net profit TTM YoY growth rate", "Non-GAAP net profit YoY growth rate"]
-            self.prepare_data["fudamental_growth"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/sub_fudamental_data.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["fudamental_growth"] = pd.read_parquet(first_existing_data_path("sub_fudamental_data.parq"))[["Stock", "Date"] + keys]
             self.description["Revenue TTM YoY growth rate"] = "Measures the percentage change in trailing twelve months' revenue compared to the same period last year."
             self.description["Net profit TTM YoY growth rate"] = "Measures the percentage change in trailing twelve months' net profit compared to the same period last year."
             self.description["Non-GAAP net profit YoY growth rate"] = "Indicates the percentage change in non-GAAP net profit compared to the same period last year."
         
         if self.modality & Modality.RISK_FACTOR:
             keys = ["Intraday volatility", "Liquidity", "Residual volatility"]
-            self.prepare_data["risk_factor"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/sub_fudamental_data.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["risk_factor"] = pd.read_parquet(first_existing_data_path("sub_fudamental_data.parq"))[["Stock", "Date"] + keys]
             self.description["Intraday volatility"] = "Measuring the price fluctuation range of a stock within a single trading day."
             self.description["Liquidity"] = "Weighted average of monthly, quarterly and yearly turnover ratio."
             self.description["Residual volatility"] = "Residual volatility measures the unexplained variability in a security's returns after accounting for market or factor influences, indicating idiosyncratic risk."
@@ -205,19 +215,19 @@ class StockDisagreementAgent():
         
         if self.modality & Modality.BASE_DATA:
             keys = ["Open", "High", "Low", "Close", "Value"]
-            self.prepare_data["base_data"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/base_data.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["base_data"] = pd.read_parquet(first_existing_data_path("base_data.parq"))[["Stock", "Date"] + keys]
         
         if self.modality & Modality.CROSS_INDUSTRY_LABEL:
             keys = ["Industry", "Daily_Return"]
-            self.prepare_data["cross_industry_label"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/industry_ret.parq")[keys]
-            self.prepare_data["stock_basic_data"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/stock_basic_data.parq")
+            self.prepare_data["cross_industry_label"] = pd.read_parquet(first_existing_data_path("industry_ret.parq"))[keys]
+            self.prepare_data["stock_basic_data"] = pd.read_parquet(first_existing_data_path("stock_basic_data.parq"))
             self.description["Daily_Return"] = "One-day return of holding the sector's constituent stocks."
         
         if self.modality & Modality.PRICE_FEATURE:
             keys = ["price_value_feature_0", "price_value_feature_1", "price_value_feature_2",
                     "price_value_feature_3", "price_value_feature_4", "price_value_feature_5"]
             
-            self.prepare_data["price_value_data"] = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/price_feature.parq")[["Stock", "Date"] + keys]
+            self.prepare_data["price_value_data"] = pd.read_parquet(first_existing_data_path("price_feature.parq", "sub_fudamental_data.parq"))[["Stock", "Date"] + keys]
             self.description["price_value_feature_0"] = "Combined feature using price and value data, theoretically negatively correlated with future daily returns over the next 1-5 days."
             self.description["price_value_feature_1"] = "Combined feature using price and value data, theoretically negatively correlated with future daily returns over the next 1-5 days."
             self.description["price_value_feature_2"] = "Combined feature using price and value data, theoretically negatively correlated with future daily returns over the next 1-5 days."

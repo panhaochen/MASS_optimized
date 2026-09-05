@@ -1,9 +1,15 @@
 import argparse
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import pandas as pd
 import numpy as np
 import pickle as pkl
 from stock_disagreement import StockDisagreementTrainer
-ROOT_PATH = "" # Your root path
+from stock_disagreement.config import data_path, first_existing_data_path, result_path
 
 def calculate_ic_rankic(res: pd.DataFrame, stock_labels: pd.DataFrame):
   
@@ -49,22 +55,28 @@ if __name__ == "__main__":
     parser.add_argument("--selected_stock_num", type=int, default=5)
     parser.add_argument("--start_date", type=int, default= 20221202)
     parser.add_argument("--end_date", type=int, default= 20240102)
-    parser.add_argument("--use_prev_stock", type=bool, default=True)
-    parser.add_argument("--use_self_reflection", type=bool, default=False)
-    parser.add_argument("--use_macro_data", type=bool, default=True)
-    parser.add_argument("--use_agent_distribution_modification", type=bool, default=True)
+    parser.add_argument("--use_prev_stock", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use_self_reflection", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use_macro_data", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use_agent_distribution_modification", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimizer_look_back_window", type=int, default=5)
-    parser.add_argument("--allow_possible_data_leakage", type=bool, default=False)
+    parser.add_argument("--allow_possible_data_leakage", action=argparse.BooleanOptionalAction, default=False)
 
     args = parser.parse_args()
 
     stock_pool_name = args.stock_pool
     assert isinstance(stock_pool_name, str)
-    stock_pool = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/{stock_pool_name}.parq")
-    industry = pd.read_parquet("{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/stock_basic_data.parq")
+    stock_pool_file = data_path(f"{stock_pool_name}.parq")
+    if stock_pool_file.exists():
+        stock_pool = pd.read_parquet(stock_pool_file)
+    elif stock_pool_name == "ih":
+        stock_pool = pd.read_parquet(first_existing_data_path("ih_label.parq"))[["Stock", "Date"]].drop_duplicates()
+    else:
+        raise FileNotFoundError(f"Stock pool file is missing: {stock_pool_file}")
+    industry = pd.read_parquet(first_existing_data_path("stock_basic_data.parq"))
     stock_pool = stock_pool.merge(industry[["Stock", "Name", "Industry"]], on=["Stock"], how="left")
-    # Change to your label file url here.
-    stock_labels = pd.read_parquet("{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/all_ashare_label.parq")
+    label_file = f"{stock_pool_name}_label.parq" if stock_pool_name == "ih" else "all_ashare_label.parq"
+    stock_labels = pd.read_parquet(first_existing_data_path(label_file, "all_ashare_label.parq"))
 
     trainer = StockDisagreementTrainer(
         num_investor_type=args.num_investor_type,
@@ -84,7 +96,7 @@ if __name__ == "__main__":
         data_leakage = args.allow_possible_data_leakage
     )
     res = trainer.run()
-    res.to_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/res/{stock_pool_name}_{args.num_agents_per_investor}_{args.num_investor_type}_{args.use_macro_data}_{args.use_agent_distribution_modification}_{args.optimizer_look_back_window}_{args.allow_possible_data_leakage}_{args.start_date}_{args.end_date}_{args.use_self_reflection}_std.parq")
-    with open(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/res/dist_{stock_pool_name}_{args.num_agents_per_investor}_{args.num_investor_type}_{args.use_macro_data}_{args.use_agent_distribution_modification}_{args.optimizer_look_back_window}_{args.allow_possible_data_leakage}_{args.start_date}_{args.end_date}_{args.use_self_reflection}_{args.stock_num}_positive.pkl", "wb") as f:
+    res.to_parquet(result_path(f"{stock_pool_name}_{args.num_agents_per_investor}_{args.num_investor_type}_{args.use_macro_data}_{args.use_agent_distribution_modification}_{args.optimizer_look_back_window}_{args.allow_possible_data_leakage}_{args.start_date}_{args.end_date}_{args.use_self_reflection}_std.parq"))
+    with open(result_path(f"dist_{stock_pool_name}_{args.num_agents_per_investor}_{args.num_investor_type}_{args.use_macro_data}_{args.use_agent_distribution_modification}_{args.optimizer_look_back_window}_{args.allow_possible_data_leakage}_{args.start_date}_{args.end_date}_{args.use_self_reflection}_{args.stock_num}_positive.pkl"), "wb") as f:
         pkl.dump(trainer.agent_distributions, f)
     calculate_ic_rankic(res, stock_labels)

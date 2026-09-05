@@ -8,8 +8,7 @@ from stock_disagreement import InvestmentAnalyzer, BaseOptimizer, SimulatedAnnea
 import threading
 import concurrent.futures
 from scipy.stats import percentileofscore
-
-ROOT_PATH = ""
+from stock_disagreement.config import first_existing_data_path
 
 class StockDisagreementTrainer():
     agent_distributions: dict[int, float] = {}
@@ -60,10 +59,14 @@ class StockDisagreementTrainer():
         self.agents: List[StockDisagreementAgent] = []
         self.use_self_reflection = use_self_reflection
         self.use_macro_data = use_macro_data
-        self.news_info = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/wind-financial-news-info.parq")
-        self.news_relationship = pd.read_parquet(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/wind-financial-news-relationship.parq")
-        self.news_info["Date"] = self.news_info["Date"].astype("int32")
-        self.news_relationship["Date"] = self.news_relationship["Date"].astype("int32")
+        try:
+            self.news_info = pd.read_parquet(first_existing_data_path("wind-financial-news-info.parq", "financial-news-info.parq"))
+            self.news_relationship = pd.read_parquet(first_existing_data_path("wind-financial-news-relationship.parq", "financial-news-relationship.parq"))
+            self.news_info["Date"] = self.news_info["Date"].astype("int32")
+            self.news_relationship["Date"] = self.news_relationship["Date"].astype("int32")
+        except FileNotFoundError:
+            self.news_info = pd.DataFrame(columns=["Date", "NewsId", "NewsTitle"])
+            self.news_relationship = pd.DataFrame(columns=["Date", "Stock", "NewsId"])
         self._init_agents() 
         self.data_leakage = data_leakage
         self.optimzer = SimulatedAnnealingOptimizer(look_back_window=optimizer_look_back_window)
@@ -83,15 +86,15 @@ class StockDisagreementTrainer():
             return data_copy[["Date", "Value", "quantile"]]  
 
 
-        loan_rate = pd.read_csv(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/macro_data/China_1-Year_Loan_Prime_Rate_LPR.csv")
-        cpi = pd.read_csv(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/macro_data/China_CPI_YoY_Current_Month.csv")
-        csi_300_pe = pd.read_csv(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/macro_data/csi_300_pe_ttm.csv")
+        loan_rate = pd.read_csv(first_existing_data_path("macro_data/China_1-Year_Loan_Prime_Rate_LPR.csv"))
+        cpi = pd.read_csv(first_existing_data_path("macro_data/China_CPI_YoY_Current_Month.csv"))
+        csi_300_pe = pd.read_csv(first_existing_data_path("macro_data/csi_300_pe_ttm.csv"))
         csi_300_pe  = cal_pe_quantile(csi_300_pe)
-        market_sentiment_index = pd.read_csv(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/macro_data/Market_Sentiment_Index.csv")
-        yield_on_China_bonds = pd.read_csv(f"{ROOT_PATH}/stock_prediction_benchmark/stock_disagreement/dataset/macro_data/yield_on_China_10_year_government_bonds.csv") 
+        market_sentiment_index = pd.read_csv(first_existing_data_path("macro_data/Market_Sentiment_Index.csv"))
+        yield_on_China_bonds = pd.read_csv(first_existing_data_path("macro_data/yield_on_China_10_year_government_bonds.csv")) 
         for num in tqdm(range(self.num_investor_type), desc="Init agents"):
-            modalities = list(Modality)
-            selected_modalities = random.sample(modalities, k=random.randint(1, 3))  
+            modalities = self._available_modalities()
+            selected_modalities = random.sample(modalities, k=random.randint(1, min(3, len(modalities))))  
             result = Modality(0)  
             for modality in selected_modalities:
                 result |= modality  
@@ -119,6 +122,25 @@ class StockDisagreementTrainer():
                 #     current_agent.generate_strategy_and_stock_selector(self.start_date)
                 self.agent_distributions[result] = 1.0
                 self.agents.append(current_agent) 
+
+    def _available_modalities(self) -> list[Modality]:
+        modalities = []
+        checks = [
+            (Modality.BASE_DATA, "base_data.parq"),
+            (Modality.CROSS_INDUSTRY_LABEL, "industry_ret.parq"),
+            (Modality.PRICE_FEATURE, "price_feature.parq", "sub_fudamental_data.parq"),
+        ]
+        if not self.news_info.empty and not self.news_relationship.empty:
+            modalities.append(Modality.NEWS)
+        for modality, *files in checks:
+            try:
+                first_existing_data_path(*files)
+                modalities.append(modality)
+            except FileNotFoundError:
+                pass
+        if not modalities:
+            raise FileNotFoundError("No usable modality data files were found in the dataset directory.")
+        return modalities
 
 
     
