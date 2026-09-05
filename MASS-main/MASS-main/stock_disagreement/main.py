@@ -61,6 +61,12 @@ if __name__ == "__main__":
     parser.add_argument("--use_agent_distribution_modification", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimizer_look_back_window", type=int, default=5)
     parser.add_argument("--allow_possible_data_leakage", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use_adaptive_router", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--router_top_k", type=int, default=0)
+    parser.add_argument("--router_diversity_lambda", type=float, default=0.35)
+    parser.add_argument("--router_cost_lambda", type=float, default=0.05)
+    parser.add_argument("--use_disagreement_diagnosis", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--abstention_threshold", type=float, default=0.45)
 
     args = parser.parse_args()
 
@@ -93,7 +99,13 @@ if __name__ == "__main__":
         use_agent_distribution_modification = args.use_agent_distribution_modification,
         look_back_window = 10,
         optimizer_look_back_window = args.optimizer_look_back_window,
-        data_leakage = args.allow_possible_data_leakage
+        data_leakage = args.allow_possible_data_leakage,
+        use_adaptive_router=args.use_adaptive_router,
+        router_top_k=args.router_top_k,
+        router_diversity_lambda=args.router_diversity_lambda,
+        router_cost_lambda=args.router_cost_lambda,
+        use_disagreement_diagnosis=args.use_disagreement_diagnosis,
+        abstention_threshold=args.abstention_threshold,
     )
     res = trainer.run()
     res.to_parquet(result_path(f"{stock_pool_name}_{args.num_agents_per_investor}_{args.num_investor_type}_{args.use_macro_data}_{args.use_agent_distribution_modification}_{args.optimizer_look_back_window}_{args.allow_possible_data_leakage}_{args.start_date}_{args.end_date}_{args.use_self_reflection}_std.parq"))

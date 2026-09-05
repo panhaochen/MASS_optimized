@@ -1,5 +1,6 @@
 import threading
 import numpy as np
+from typing import Any
 
 class InvestmentAnalyzer:
     _instance = None
@@ -37,8 +38,37 @@ class InvestmentAnalyzer:
                                            date: int,
                                            stock_pool: list[str], 
                                            agent_distributions:dict[int, float] ,
-                                           alpha:float = 0.5):
-        res = {}
+                                           alpha:float = 0.5,
+                                           disagreement_diagnostics: dict[str, dict[str, Any]] | None = None):
+        res = self.collect_stock_opinions(date, stock_pool, agent_distributions)
+        for stock_code, values in res.items():
+            scores = np.array(values["scores"], dtype=float)
+            weights = np.array(values["weights"], dtype=float)
+            if weights.sum() <= 0:
+                mean_value = 0.0
+                std = 0.0
+            else:
+                mean_value = float(np.sum(scores * weights) / np.sum(weights))
+                std = float(np.sqrt(np.average((scores - mean_value) ** 2, weights=weights)))
+            signal = alpha * mean_value - (1 - alpha) * std
+            diagnostics = disagreement_diagnostics.get(stock_code, {}) if disagreement_diagnostics else {}
+            exposure_control = float(diagnostics.get("exposure_control", 1.0))
+            final_signal = exposure_control * signal
+            res[stock_code] = [
+                final_signal,
+                mean_value,
+                -std,
+                exposure_control,
+                float(diagnostics.get("severity", std)),
+                str(diagnostics.get("type", "aggregate")),
+            ]
+        return res
+
+    def collect_stock_opinions(self,
+                               date: int,
+                               stock_pool: list[str],
+                               agent_distributions: dict[int, float]) -> dict[str, dict[str, list[float]]]:
+        res: dict[str, dict[str, list[float]]] = {}
         distributions = []
         with threading.Lock():
             for investor_type in self.data[date]:
@@ -58,13 +88,9 @@ class InvestmentAnalyzer:
                     total_scores = stock_data["score"]
                     total_investors = stock_data["num_investors"]
                     if stock_code not in res:
-                        res[stock_code] = [(total_scores / total_investors) if total_investors != 0 else 0]
-                    else:
-                        res[stock_code].append((total_scores / total_investors)if total_investors != 0 else 0)
+                        res[stock_code] = {"scores": [], "weights": [], "agent_types": []}
+                    res[stock_code]["scores"].append((total_scores / total_investors) if total_investors != 0 else 0)
+                    res[stock_code]["weights"].append(distribution)
+                    res[stock_code]["agent_types"].append(investor_type)
                 distributions.append(distribution)
-        for stock_code in res:
-            mean_value = np.sum(np.array(res[stock_code]) * distributions) / np.sum(distributions)
-            std = np.sqrt(np.average((np.array(res[stock_code]) - mean_value) ** 2, weights=distributions))
-            res[stock_code] = [alpha * mean_value - (1 - alpha) * std, mean_value, -std]
         return res
-

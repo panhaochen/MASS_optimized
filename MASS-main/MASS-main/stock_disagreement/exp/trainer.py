@@ -9,6 +9,11 @@ import threading
 import concurrent.futures
 from scipy.stats import percentileofscore
 from stock_disagreement.config import first_existing_data_path
+from stock_disagreement.exp.orchestration import (
+    DiversityCostAwareRouter,
+    MarketStateEncoder,
+    StructuredDisagreementDiagnoser,
+)
 
 class StockDisagreementTrainer():
     agent_distributions: dict[int, float] = {}
@@ -29,8 +34,19 @@ class StockDisagreementTrainer():
                  use_agent_distribution_modification: bool = False,
                  optimizer_look_back_window: int = 2,
                  data_leakage: bool = False,
+                 use_adaptive_router: bool = False,
+                 router_top_k: int = 0,
+                 router_diversity_lambda: float = 0.35,
+                 router_cost_lambda: float = 0.05,
+                 use_disagreement_diagnosis: bool = False,
+                 abstention_threshold: float = 0.45,
                  ):
         self.interval = 4
+        self.agent_distributions = {}
+        self.date_agent_distributions = {}
+        self.date_market_states = {}
+        self.date_selected_agents = {}
+        self.date_diagnostics = {}
         self.num_investor_type = num_investor_type
         self.stock_selector_for_per_investor = stock_selector_for_per_investor
         self.num_agents_per_investor = num_agents_per_investor
@@ -59,6 +75,18 @@ class StockDisagreementTrainer():
         self.agents: List[StockDisagreementAgent] = []
         self.use_self_reflection = use_self_reflection
         self.use_macro_data = use_macro_data
+        self.use_adaptive_router = use_adaptive_router
+        self.use_disagreement_diagnosis = use_disagreement_diagnosis
+        self.market_state_encoder = MarketStateEncoder(self.stock_pool, self.stock_labels)
+        self.router = DiversityCostAwareRouter(
+            top_k=router_top_k,
+            min_agents=1,
+            diversity_lambda=router_diversity_lambda,
+            cost_lambda=router_cost_lambda,
+        )
+        self.disagreement_diagnoser = StructuredDisagreementDiagnoser(
+            abstention_threshold=abstention_threshold,
+        )
         try:
             self.news_info = pd.read_parquet(first_existing_data_path("wind-financial-news-info.parq", "financial-news-info.parq"))
             self.news_relationship = pd.read_parquet(first_existing_data_path("wind-financial-news-relationship.parq", "financial-news-relationship.parq"))
@@ -67,6 +95,7 @@ class StockDisagreementTrainer():
         except FileNotFoundError:
             self.news_info = pd.DataFrame(columns=["Date", "NewsId", "NewsTitle"])
             self.news_relationship = pd.DataFrame(columns=["Date", "Stock", "NewsId"])
+        self.market_state_encoder = MarketStateEncoder(self.stock_pool, self.stock_labels, self.news_relationship)
         self._init_agents() 
         self.data_leakage = data_leakage
         self.optimzer = SimulatedAnnealingOptimizer(look_back_window=optimizer_look_back_window)
@@ -116,6 +145,7 @@ class StockDisagreementTrainer():
                                                    use_self_reflection = self.use_self_reflection,
                                                    use_macro_data = self.use_macro_data) 
                 current_agent.prepare_data_source(self.news_info, self.news_relationship)
+                current_agent.estimated_cost = 1.0 + 0.1 * max(int(result).bit_count(), 1)
                 # if not self.use_macro_data:
                 #     current_agent.generate_strategy_and_stock_selector()
                 # else:
@@ -147,28 +177,56 @@ class StockDisagreementTrainer():
     def run(self) -> pd.DataFrame:  
         def _process_agent(agent:StockDisagreementAgent, date: int, stock_selector):  
             agent.invest(date, stock_selector)
+
+        def _selected_agents_for_date(date: int) -> list[StockDisagreementAgent]:
+            if not self.use_adaptive_router:
+                return self.agents
+            market_state = self.market_state_encoder.encode(date)
+            selected_agents = self.router.select_agents(self.agents, market_state)
+            self.date_market_states[date] = market_state
+            self.date_selected_agents[date] = [agent.modality for agent in selected_agents]
+            return selected_agents
         
         if not self.use_agent_distribution_modification:
-            total_agent_tasks = len(self.dates) * len(self.agents) 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:  
-                futures = [  
-                    executor.submit(_process_agent, agent, date, self.stock_selector_for_per_investor)  
-                    for date in self.dates  
-                    for agent in self.agents  
-                ]    
-                for future in tqdm(  
-                    concurrent.futures.as_completed(futures),  
-                    total=total_agent_tasks,  
-                    desc="Processing agents"  
-                ):   
-                    future.result() 
+            if self.use_adaptive_router:
+                for date in self.dates:
+                    selected_agents = _selected_agents_for_date(date)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(selected_agents))) as executor:
+                        futures = [
+                            executor.submit(_process_agent, agent, date, self.stock_selector_for_per_investor)
+                            for agent in selected_agents
+                        ]
+                        for future in tqdm(
+                            concurrent.futures.as_completed(futures),
+                            total=len(futures),
+                            desc=f"Processing routed agents on {date}"
+                        ):
+                            future.result()
+                    self.date_agent_distributions[date] = self.router.active_distributions(
+                        selected_agents, self.agent_distributions
+                    )
+            else:
+                total_agent_tasks = len(self.dates) * len(self.agents) 
+                with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:  
+                    futures = [  
+                        executor.submit(_process_agent, agent, date, self.stock_selector_for_per_investor)  
+                        for date in self.dates  
+                        for agent in self.agents  
+                    ]    
+                    for future in tqdm(  
+                        concurrent.futures.as_completed(futures),  
+                        total=total_agent_tasks,  
+                        desc="Processing agents"  
+                    ):   
+                        future.result() 
         else:
             for date in self.dates:
-                total_tasks = len(self.agents)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+                selected_agents = _selected_agents_for_date(date)
+                total_tasks = len(selected_agents)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, max(total_tasks, 1))) as executor:
                     futures = [
                         executor.submit(_process_agent, agent, date, self.stock_selector_for_per_investor)
-                        for agent in self.agents
+                        for agent in selected_agents
                     ]
                     for future in tqdm(
                         concurrent.futures.as_completed(futures),
@@ -191,6 +249,10 @@ class StockDisagreementTrainer():
                         self.date_agent_distributions[date] = best_distributions
                 else:
                     self.date_agent_distributions[date] = self.agent_distributions
+                if self.use_adaptive_router:
+                    self.date_agent_distributions[date] = self.router.active_distributions(
+                        selected_agents, self.date_agent_distributions[date]
+                    )
                 
         investment_analyzer = self.agents[0].investment_analyzer  
         investment_res = self.stock_pool[(self.stock_pool["Date"] >= self.start_date) & (self.stock_pool["Date"] <= self.end_date) ].copy()  
@@ -198,11 +260,22 @@ class StockDisagreementTrainer():
 
         def _calc_signal(date: int, agent_distributions: dict[int, float]): 
             current_pool = self.stock_pool[self.stock_pool["Date"] == date]["Stock"].tolist()  
-            res = investment_analyzer.calculate_stock_disagreement_score(date, current_pool, agent_distributions=agent_distributions)  
+            diagnostics = None
+            if self.use_disagreement_diagnosis:
+                market_state = self.date_market_states.get(date) or self.market_state_encoder.encode(date)
+                raw_opinions = investment_analyzer.collect_stock_opinions(date, current_pool, agent_distributions)
+                diagnostics = self.disagreement_diagnoser.diagnose(raw_opinions, market_state)
+                self.date_diagnostics[date] = diagnostics
+            res = investment_analyzer.calculate_stock_disagreement_score(
+                date,
+                current_pool,
+                agent_distributions=agent_distributions,
+                disagreement_diagnostics=diagnostics,
+            )  
             return date, res   
         
         date_signal_results = {}  
-        if not self.use_agent_distribution_modification:
+        if not self.use_agent_distribution_modification and not self.use_adaptive_router:
             with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:  
                 date_futures = {executor.submit(_calc_signal, date, self.agent_distributions): date for date in self.dates}  
                 for future in tqdm(  
@@ -220,8 +293,20 @@ class StockDisagreementTrainer():
         data_list = []
         for date, res in date_signal_results.items():
             for stock, values in res.items():
-                data_list.append([date, stock, values[0], values[1], values[2]])
-        result_df = pd.DataFrame(data_list, columns=['Date', 'Stock', 'Signal', 'Signal_mean', 'Signal_std'])
+                data_list.append([date, stock, values[0], values[1], values[2], values[3], values[4], values[5]])
+        result_df = pd.DataFrame(
+            data_list,
+            columns=[
+                'Date',
+                'Stock',
+                'Signal',
+                'Signal_mean',
+                'Signal_std',
+                'ExposureControl',
+                'DisagreementSeverity',
+                'DisagreementType',
+            ],
+        )
         investment_res = pd.merge(investment_res, result_df, on=['Date', 'Stock'], how='left')
         for date, res in date_signal_results.items():  
             for stock, values in res.items():  
@@ -229,6 +314,9 @@ class StockDisagreementTrainer():
                 investment_res.loc[indexer, "Signal"] = values[0]  
                 investment_res.loc[indexer, "Signal_mean"] = values[1]  
                 investment_res.loc[indexer, "Signal_std"] = values[2]  
+                investment_res.loc[indexer, "ExposureControl"] = values[3]  
+                investment_res.loc[indexer, "DisagreementSeverity"] = values[4]  
+                investment_res.loc[indexer, "DisagreementType"] = values[5]  
         return investment_res
 
     # def run(self) -> pd.DataFrame: 
